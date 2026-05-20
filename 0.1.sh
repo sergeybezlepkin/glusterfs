@@ -25,8 +25,8 @@ fi
 # 3. Time sync
 if ! timedatectl | grep -q "System clock synchronized: yes"; then
     echo "The time is not synchronized. GlusterFS requires precise timing."
-    dnf install -y chrony &>/dev/null && systemctl enable --now chronyd
-    echo "Restart after synchronization."
+    dnf install -y chrony &>/dev/null && systemctl enable --now chronyd && systemctl restart chronyd
+    echo "Restart after synchronization"
 exit 1
 fi
 
