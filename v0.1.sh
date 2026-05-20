@@ -6,10 +6,7 @@ set -euo pipefail
 #==========================================================
 
 # --- 1. Root verification ---
-if [[ "$EUID" -ne 0 ]]; then
-    echo "Run the script from root: sudo $0"
-exit 1
-fi
+if [ "$EUID" -ne 0 ]; then exec sudo "$0" "$@"; fi
 
 # --- 2. SSH configuration (interactive) ---
 echo " === SSH ACCESS CONFIGURATION ==="
@@ -25,7 +22,7 @@ fi
 
 [[ ! -f "$HOME/.ssh/config" ]] && touch "$HOME/.ssh/config" && chmod 600 "$HOME/.ssh/config"
 
-read -p "How many DELETED nodes should I add? (Total will be: N + 1 local): " node_count
+read -p "How many remote nodes should I add? (Total will be: N + 1 local): " node_count
 [[ "$node_count" =~ ^[1-9][0-9]*$ ]] || { echo "Enter a number >= 1"; exit 1; }
 
 for (( i=1; i<=node_count; i++ )); do
