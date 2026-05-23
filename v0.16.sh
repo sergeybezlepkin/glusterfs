@@ -117,30 +117,36 @@ HOSTS_BLOCK=$(mktemp)
 for i in "${!ALIASES[@]}"; do
     echo ""
 echo ">>> Node: ${ALIASES[$i]} (${IPS[$i]})"
-echo " [1/2] Uploading the hosts_block file to a remote node..."
-    ssh "${USERS[$i]}@${ALIASES[$i]}" "cat > /tmp/gluster_hosts_block" < "$HOSTS_BLOCK"
-    ssh "${USERS[$i]}@${ALIASES[$i]}" "cat > /tmp/sync_hosts.sh" <<'SYNC_EOF'
-# Simplified pattern without ^ and $, checking the existence of markers
+echo " [1/2] Uploading a hosts_block file to a remote node..."
+ssh "${USERS[$i]}@${ALIASES[$i]}" "cat > /tmp/gluster_hosts_block" < "$HOSTS_BLOCK"
+ssh "${USERS[$i]}@${ALIASES[$i]}" "cat > /tmp/sync_hosts.sh " <<'SYNC_EOF'
+# Deleting old entries via grep -v (inverted match)
 if grep -q "# GLUSTERFS_CLUSTER_START" /etc/hosts; then
-    sed -i '/# GLUSTERFS_CLUSTER_START/,/# GLUSTERFS_CLUSTER_END/d' /etc/hosts
+    grep -v "# GLUSTERFS_CLUSTER_START\|# GLUSTERFS_CLUSTER_END" /etc/hosts | \
+        grep -v "192\.168\.72\." > /tmp/hosts_clean
+    mv /tmp/hosts_clean /etc/hosts
 fi
 cat /tmp/gluster_hosts_block >> /etc/hosts
 rm -f /tmp/gluster_hosts_block
 SYNC_EOF
 echo " [2/2] Applying changes to /etc/hosts (requires sudo password)..."
-    ssh -t "${USERS[$i]}@${ALIASES[$i]}" "sudo bash /tmp/sync_hosts.sh && rm -f /tmp/sync_hosts.sh "
-echo " Is done."
+ssh -t "${USERS[$i]}@${ALIASES[$i]}" "sudo bash /tmp/sync_hosts.sh && rm -f /tmp/sync_hosts.sh "
+echo " is ready."
 done
 
 echo ""
 echo "Updating local /etc/hosts..."
-# Fixed: simplified pattern + existence check
-if grep -q "# GLUSTERFS_CLUSTER_START" /etc/hosts; then
-    sed -i '/# GLUSTERFS_CLUSTER_START/,/# GLUSTERFS_CLUSTER_END/d'/etc/hosts
+
+if grep -q "#GLUSTERFS_CLUSTER_START" /etc/hosts; then
+    echo " Deleting old cluster records..."
+    grep -v "# GLUSTERFS_CLUSTER_START\|# GLUSTERFS_CLUSTER_END" /etc/hosts | \
+        grep -v "192\.168\.72\." > /tmp/hosts_clean
+    mv /tmp/hosts_clean /etc/hosts
 fi
+echo " Adding new entries..."
 cat "$HOSTS_BLOCK" >> /etc/hosts
 rm -f "$HOSTS_BLOCK"
-echo"/etc/hosts successfully synchronized."
+echo "/etc/hosts successfully synchronized."
 
 # ==========================================================
 # 2. DETERMINING THE OWNER OF BRICK (gluster / glusterfs)
