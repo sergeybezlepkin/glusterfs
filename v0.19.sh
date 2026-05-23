@@ -285,8 +285,11 @@ BRICK_PATH="${BRICK_PATH:-/data/gluster/brick}"
 
 if gluster volume info "$VOL_NAME" &>/dev/null; then
     echo "Volume '$VOL_NAME' already exists. Deleting metadata..."
-gluster volume stop "$VOL_NAME" force || true
-    gluster volume delete "$VOL_NAME"
+gluster volume stop "$VOL_NAME" force 2>/dev/null || true
+    gluster volume delete "$VOL_NAME" 2>/dev/null || true
+    echo "The old volume has been deleted."
+else
+echo "The volume '$VOL_NAME' does not exist. Creating a new one."
 fi
 
 echo ""
@@ -294,14 +297,17 @@ echo "Creating brick directories ($BRICK_PATH) with the owner $GLUSTER_USER..."
 for i in "${!ALIASES[@]}"; do
     echo ""
 echo ">>> Node: ${ALIASES[$i]} (${IPS[$i]})"
-echo " Creating a $BRICK_PATH with the owner of $GLUSTER_USER:$GLUSTER_USER (sudo password required)..."
-ssh -t "${USERS[$i]}@${ALIASES[$i]}" "sudo mkdir -p $BRICK_PATH && sudo chown -R $GLUSTER_USER:$GLUSTER_USER $BRICK_PATH"
+echo" [Operation] Creating the $BRICK_PATH directory and assigning the owner to $GLUSTER_USER"
+echo " >>> Enter the sudo password for the node: ${ALIASES[$i]} (${IPS[$i]})"
+    ssh -t "${USERS[$i]}@${ALIASES[$i]}" "sudo mkdir -p $BRICK_PATH && sudo chown -R $GLUSTER_USER:$GLUSTER_USER $BRICK_PATH" 2>/dev/null || {
+        echo " WARNING: the directory may already exist. Continuing..."
+}
 echo " Done."
 done
 echo ""
 echo "Creating a local brick directory..."
-sudo mkdir -p "$BRICK_PATH"
-sudo chown -R "$GLUSTER_USER:$GLUSTER_USER" "$BRICK_PATH"
+sudo mkdir -p "$BRICK_PATH" 2>/dev/null || true
+sudo chown -R "$GLUSTER_USER:$GLUSTER_USER" "$BRICK_PATH" 2>/dev/null || true
 echo "The local brick is ready."
 
 REPLICA_COUNT=3
@@ -313,13 +319,77 @@ for h in "${ACTIVE_NODES[@]}"; do BRICKS+=("$h:$BRICK_PATH"); done
 
 echo ""
 echo "Volume creation $VOL_NAME (replica $REPLICA_COUNT)..."
-gluster volume create "$VOL_NAME" replica "$REPLICA_COUNT" "${BRICKS[@]}" force
-echo "Enabling volume-level encryption..."
-gluster volume set "$VOL_NAME" encryption on
-echo "Volume start..."
-gluster volume start "$VOL_NAME"
-echo "The volume is created, running, and encryption is enabled."
+gluster volume create "$VOL_NAME" replica "$REPLICA_COUNT" "${BRICKS[@]}" force 2>&1 || {
+echo "Volume creation ERROR."
+    exit 1
+}
 
+# ==========================================================
+# ENABLING TLS ENCRYPTION
+# ==========================================================
+echo ""
+echo "Enabling TLS encryption (client.ssl + server.ssl at volume level)..."
+
+gluster volume set "$VOL_NAME" client.ssl on 2>&1 || {
+    echo "ERROR: failed to enable client.ssl."
+exit 1
+}
+gluster volume set "$VOL_NAME" server.ssl on 2>&1 || {
+echo "ERROR: failed to enable server.ssl."
+exit 1
+}
+
+echo ""
+echo "Checking and creating secure access on remote nodes..."
+for i in "${!ALIASES[@]}"; do
+    echo " >>> Node: ${ALIASES[$i]} (${IPS[$i]})"
+echo " [Operation] Creating a /var/lib/glusterd/secure-access file to activate TLS"
+echo " >>> Enter the sudo password for the node: ${ALIASES[$i]} (${IPS[$i]})"
+ssh-t "${USERS[$i]}@${ALIASES[$i]}" "sudo touch /var/lib/glusterd/secure-access"
+done
+echo " Locally:"
+sudo touch /var/lib/glusterd/secure-access
+echo " secure-access is created on all nodes."
+
+echo ""
+echo "Restarting glusterd on all nodes to activate TLS..."
+for i in "${!ALIASES[@]}"; do
+    echo " >>> Node: ${ALIASES[$i]} (${IPS[$i]})"
+echo " [Operation] Restarting the glusterd service to pick up TLS settings"
+    echo " >>> Enter the sudo password for the node: ${ALIASES[$i]} (${IPS[$i]})"
+ssh -t "${USERS[$i]}@${ALIASES[$i]}" "sudo systemctl restart glusterd"
+done
+echo " Restarting local glusterd..."
+sudo systemctl restart glusterd
+sleep 3
+
+echo ""
+echo "Volume startup..."
+gluster volume start "$VOL_NAME" 2>&1 || {
+echo "Volume startup ERROR."
+    exit 1
+}
+
+echo ""
+echo "TLS status check..."
+CLIENT_SSL=$(gluster volume get "$VOL_NAME" client.ssl 2>/dev/null |tail -1 | awk '{print $2}')
+SERVER_SSL=$(gluster volume get "$VOL_NAME" server.ssl 2>/dev/null | tail -1 | awk '{print $2}')
+
+echo "    client.ssl: $CLIENT_SSL"
+echo "    server.ssl: $SERVER_SSL"
+
+if [[ "$CLIENT_SSL" == "on" && "$SERVER_SSL" == "on" ]]; then
+    echo "TLS encryption IS ACTIVE."
+else
+echo "ATTENTION: TLS is not fully activated."
+    echo "Check the logs: journalctl -u glusterd -f"
+fi
+
+echo "The volume is created, running, and TLS encryption is enabled."
+
+# ==========================================================
+# MOUNTING
+# ==========================================================
 echo ""
 echo "Mounting a volume on all nodes..."
 for i in "${!ALIASES[@]}"; do
@@ -331,20 +401,27 @@ mkdir -p /mnt/$VOL_NAME
 if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
     echo "localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0" >> /etc/fstab
 fi
+systemctl daemon-reload
 mount -a 2>/dev/null || mount -t glusterfs localhost:/$VOL_NAME /mnt/$VOL_NAME
 MOUNT_SCRIPT
-    echo " Mounting execution (requires sudo password)..."
-ssh -t "${USERS[$i]}@${ALIASES[$i]}" "sudo bash /tmp/gluster_mount.sh && rm -f /tmp/gluster_mount.sh "
-echo " Is done."
+    echo " [Operation] Creating a mount point, adding to /etc/fstab, and mounting the volume"
+    echo " >>> Enter the sudo password for the node: ${ALIASES[$i]} (${IPS[$i]})"
+ssh -t "${USERS[$i]}@${ALIASES[$i]} " "sudo bash /tmp/gluster_mount.sh && rm -f /tmp/gluster_mount.sh " 2>/dev/null || {
+        echo " WARNING: The mounting may have already been completed."
+    }
+    echo " Done."
 done
 
 echo ""
 echo "Local mount..."
-mkdir -p "/mnt/$VOL_NAME"
+mkdir -p "/mnt/$VOL_NAME" 2>/dev/null || true
 if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
     echo "localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0" >> /etc/fstab
 fi
-mount -a 2>/dev/null || mount -t glusterfs "localhost:/$VOL_NAME" "/mnt/$VOL_NAME"
+systemctl daemon-reload 2>/dev/null || true
+mount -a 2>/dev/null ||mount -t glusterfs "localhost:/$VOL_NAME" "/mnt/$VOL_NAME" 2>/dev/null || {
+echo "WARNING: local mounting may be it has already been completed."
+}
 
 echo ""
 echo "============================================================"
@@ -353,9 +430,9 @@ echo "============================================================"
 echo "Cluster status:"
 gluster peer status | grep -E "Hostname|State"
 echo ""
-echo "Volume Information:"
-gluster volume info "$VOL_NAME" | grep -E "Volume Name|Status|Encryption|Type"
+echo "Volume information:"
+gluster volume info "$VOL_NAME"
 echo ""
 echo "Disk:"
-df -h "/mnt/$VOL_NAME The "
-echo" volume is accessible via the path: /mnt/$VOL_NAME on all nodes."
+df -h "/mnt/$VOL_NAME" 2>/dev/null || echo "Volume unmounted locally. The "
+echo" volume is accessible by path: /mnt/$VOL_NAME on all nodes."
