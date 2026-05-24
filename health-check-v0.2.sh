@@ -108,25 +108,42 @@ if [[ "$HEAL_FAILED" -gt 0 ]]; then
 fi
 
 # ==========================================================
-# CHECK 8: Disk usage (FIXED: safe arithmetic)
+# CHECK 8: Mount & Disk usage (robust FUSE check)
 # ==========================================================
 DISK_USAGE=""
 DISK_AVAIL="N/A"
+MOUNT_PATH="/mnt/$VOL_NAME"
 
-if mountpoint -q "/mnt/$VOL_NAME" 2>/dev/null; then
-    DISK_USAGE=$(df "/mnt/$VOL_NAME" 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
-    DISK_AVAIL=$(df -h "/mnt/$VOL_NAME" 2>/dev/null | tail -1 | awk '{print $4}')
+is_mount_alive() {
+    local path="$1"
+    # 1. Check if it's a mount point at all
+    mountpoint -q "$path" 2>/dev/null || return 1
     
-    # FIXED: Only compare if DISK_USAGE is a valid number
+    # 2. Check if stat works (detects hung FUSE)
+    timeout 3 stat "$path" >/dev/null 2>&1 || return 1
+    
+    # 3. Check if df returns valid data (confirms FS is responsive)
+    df "$path" >/dev/null 2>&1 || return 1
+    
+    return 0
+}
+
+if is_mount_alive "$MOUNT_PATH"; then
+    DISK_USAGE=$(df "$MOUNT_PATH" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
+    DISK_AVAIL=$(df -h "$MOUNT_PATH" 2>/dev/null | awk 'NR==2{print $4}')
+    
     if [[ "$DISK_USAGE" =~ ^[0-9]+$ ]]; then
-        if [[ "$DISK_USAGE" -ge 90 ]]; then
-            log_issue "CRITICAL" "Volume $VOL_NAME is ${DISK_USAGE}% full (Available: $DISK_AVAIL)"
-        elif [[ "$DISK_USAGE" -ge 80 ]]; then
-            log_issue "WARNING" "Volume $VOL_NAME is ${DISK_USAGE}% full (Available: $DISK_AVAIL)"
-        fi
+        [[ "$DISK_USAGE" -ge 90 ]] && log_issue "CRITICAL" "Disk ${DISK_USAGE}% full (avail: $DISK_AVAIL)"
+        [[ "$DISK_USAGE" -ge 80 && "$DISK_USAGE" -lt 90 ]] && log_issue "WARNING" "Disk ${DISK_USAGE}% full (avail: $DISK_AVAIL)"
     fi
 else
-    log_issue "WARNING" "Volume $VOL_NAME is not mounted at /mnt/$VOL_NAME"
+    # Directory exists but mount is dead/hung vs not mounted at all
+    if [[ -d "$MOUNT_PATH" ]]; then
+        log_issue "CRITICAL" "Mount point $MOUNT_PATH exists but is NOT accessible (hung FUSE or stale mount)"
+        log_message "INFO" "Fix: umount -l $MOUNT_PATH && mount -t glusterfs localhost:/$VOL_NAME $MOUNT_PATH"
+    else
+        log_issue "WARNING" "Volume not mounted at $MOUNT_PATH (directory does not exist)"
+    fi
 fi
 
 # ==========================================================
