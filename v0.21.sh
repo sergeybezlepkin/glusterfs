@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==========================================================
-# Run ONLY on the first (local) cluster node
-# ==========================================================
-
 if [ "$EUID" -ne 0 ]; then exec sudo "$0" "$@"; fi
 
 echo "=== SSH ACCESS SETUP ==="
@@ -256,7 +252,6 @@ echo "============================================================"
 echo "[4/5] ADDING NODES TO THE CLUSTER (PEER PROBE)"
 echo "============================================================"
 
-# FIXED: Use hostnames instead of IPs so 'gluster peer status' shows names
 for i in "${!ALIASES[@]}"; do
     REMOTE_HOSTNAME="${NODE_NAMES[$((i+1))]}"
     echo "Probe: $REMOTE_HOSTNAME (${IPS[$i]})"
@@ -430,40 +425,33 @@ for i in "${!ALIASES[@]}"; do
     echo ""
     echo ">>> Node: ${ALIASES[$i]} (${IPS[$i]})"
     
-    # NEW APPROACH: aggressive cleanup without relying on mountpoint -q
     ssh "${USERS[$i]}@${ALIASES[$i]}" "cat > /tmp/gluster_mount.sh" <<MOUNT_SCRIPT
-set +e  # Disable exit on error for cleanup phase
+set +e  
 
-# Step 1: Force lazy unmount regardless of current state
 umount -l /mnt/$VOL_NAME 2>/dev/null
 umount -f /mnt/$VOL_NAME 2>/dev/null
 sleep 2
 
-# Step 2: Check if directory is accessible via stat
 if ! stat /mnt/$VOL_NAME >/dev/null 2>&1; then
     # Directory is hung/broken - remove and recreate
     rmdir /mnt/$VOL_NAME 2>/dev/null
     rm -rf /mnt/$VOL_NAME 2>/dev/null
 fi
 
-# Step 3: Create fresh mount point
 mkdir -p /mnt/$VOL_NAME
 
-set -e  # Re-enable exit on error
+set -e  
 
-# Step 4: Add to fstab if not present
 if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
     echo "localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0" >> /etc/fstab
 fi
 systemctl daemon-reload
 
-# Step 5: Mount only if not already mounted
 if ! mountpoint -q /mnt/$VOL_NAME 2>/dev/null; then
     mount -t glusterfs localhost:/$VOL_NAME /mnt/$VOL_NAME
 fi
 MOUNT_SCRIPT
     
-    # Check current state via df (more reliable than mountpoint for hung mounts)
     REMOTE_MOUNTED=$(ssh "${USERS[$i]}@${ALIASES[$i]}" "df /mnt/$VOL_NAME 2>/dev/null | tail -1 | awk '{print \$1}'" 2>/dev/null || echo "no")
     
     if [[ "$REMOTE_MOUNTED" == "localhost:/$VOL_NAME" ]]; then
@@ -481,7 +469,6 @@ done
 echo ""
 echo "Local mount..."
 
-# Same aggressive cleanup for local node
 set +e
 umount -l "/mnt/$VOL_NAME" 2>/dev/null
 umount -f "/mnt/$VOL_NAME" 2>/dev/null
