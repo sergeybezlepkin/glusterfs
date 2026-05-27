@@ -2,13 +2,9 @@
 set -uo pipefail
 
 # ==========================================================
-# GlusterFS Health Check Script (Zabbix-friendly)
-# Auto-elevates to root, logs to current directory
-# Run: ./gluster-healthcheck.sh [volume_name]
-# Cron: */5 * * * * /path/to/gluster-healthcheck.sh gv0
+# Cron: */5 * * * * /path/to/gluster-healthcheck.sh
 # ==========================================================
 
-# Auto-elevate to root if not running as admin
 if [ "$EUID" -ne 0 ]; then exec sudo "$0" "$@"; fi
 
 VOL_NAME="${1:-gv0}"
@@ -36,7 +32,6 @@ log_issue() {
     ISSUES=$((ISSUES + 1))
 }
 
-# Bulletproof numeric extraction: always returns a single valid integer
 safe_count() {
     local cmd="$1"
     local result
@@ -128,22 +123,17 @@ else
     if [[ -d "$MOUNT_PATH" ]]; then
         log_issue "CRITICAL" "Mount point $MOUNT_PATH exists but is NOT accessible (hung FUSE or stale mount)"
 
-        # AUTO-FIX: attempt recovery
         log_message "INFO" "Attempting auto-recovery..."
 
-        # Try lazy unmount first (may already be unmounted from kernel table)
         umount -l "$MOUNT_PATH" 2>/dev/null || true
 
-        # Kill any processes holding the directory open
         fuser -km "$MOUNT_PATH" 2>/dev/null || true
         sleep 2
 
-        # Remove and recreate mount point (with timeout to avoid hanging forever)
         if timeout 5 rm -rf "$MOUNT_PATH" 2>/dev/null; then
             mkdir -p "$MOUNT_PATH"
             if mount -t glusterfs "localhost:/$VOL_NAME" "$MOUNT_PATH" 2>/dev/null; then
                 log_message "OK" "Auto-recovery successful: $MOUNT_PATH remounted"
-                # Re-read disk usage after successful recovery
                 DISK_USAGE=$(df "$MOUNT_PATH" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
                 DISK_AVAIL=$(df -h "$MOUNT_PATH" 2>/dev/null | awk 'NR==2{print $4}')
             else
