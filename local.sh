@@ -26,7 +26,8 @@ fi
 if ! timedatectl | grep -q "System clock synchronized: yes"; then
     echo "The time is not synchronized. GlusterFS requires precise timing."
     dnf install -y chrony &>/dev/null && systemctl enable --now chronyd && systemctl restart chronyd
-    echo "Restart after synchronization"
+    timedatectl
+    echo "Restart the script after synchronization. Give it 1-2 minutes; chronyd has already restarted."
 exit 1
 fi
 
@@ -60,4 +61,4 @@ if [[ ! -f /etc/ssl/glusterfs.key ]]; then
     chown root:root /etc/ssl/glusterfs.{key,pem}
 fi
 
-echo "Part 1 is completed. Run Part 2 on the first node."
+echo "Local GlusterFS setup and installation is complete. Run the "Part 2" script on the first node."
