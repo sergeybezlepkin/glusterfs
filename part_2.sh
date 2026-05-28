@@ -440,11 +440,21 @@ fi
 
 mkdir -p /mnt/$VOL_NAME
 
-set -e  
+set -e
+
+NODE_IP=$(hostname -I | awk '{print $1}')
 
 if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
-    echo "localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0" >> /etc/fstab
+    echo "${NODE_IP}:/${VOL_NAME} /mnt/${VOL_NAME} glusterfs defaults,_netdev,x-systemd.requires=glusterd.service,x-systemd.after=network-online.target,x-systemd.device-timeout=15 0 0" >> /etc/fstab
+    echo "Entry added to /etc/fstab for ${NODE_IP}:/${VOL_NAME}"
+else
+    echo "Entry already exists in /etc/fstab. Skipping."
 fi
+
+#if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
+#    localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0
+#    echo "localhost:/gv0 /mnt/gv0 glusterfs defaults,_netdev,x-systemd.requires=glusterd.service,x-systemd.after=network-online.target 0 0" >> /etc/fstab
+#fi
 systemctl daemon-reload
 
 if ! mountpoint -q /mnt/$VOL_NAME 2>/dev/null; then
@@ -482,10 +492,20 @@ fi
 mkdir -p "/mnt/$VOL_NAME"
 set -e
 
+NODE_IP=$(hostname -I | awk '{print $1}')
+
 if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
-    #localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0
-    echo "localhost:/gv0 /mnt/gv0 glusterfs _netdev,x-systemd.requires=glusterd.service,transport=socket 0 0" >> /etc/fstab
+    echo "${NODE_IP}:/${VOL_NAME} /mnt/${VOL_NAME} glusterfs defaults,_netdev,x-systemd.requires=glusterd.service,x-systemd.after=network-online.target,x-systemd.device-timeout=15 0 0" >> /etc/fstab
+    echo "Entry added to /etc/fstab for ${NODE_IP}:/${VOL_NAME}"
+else
+    echo "Entry already exists in /etc/fstab. Skipping."
 fi
+
+#if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
+    #localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0
+    #localhost:/gv0 /mnt/gv0 glusterfs defaults,_netdev,x-systemd.requires=glusterd.service,x-systemd.after=network-online.target 0 0
+#    echo "localhost:/gv0 /mnt/gv0 glusterfs defaults,_netdev,x-systemd.requires=glusterd.service,x-systemd.after=network-online.target 0 0" >> /etc/fstab
+#fi
 systemctl daemon-reload 2>/dev/null || true
 
 LOCAL_STATUS=$(df "/mnt/$VOL_NAME" 2>/dev/null | tail -1 | awk '{print $1}' || echo "no")
