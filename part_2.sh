@@ -483,7 +483,8 @@ mkdir -p "/mnt/$VOL_NAME"
 set -e
 
 if ! grep -q "/mnt/$VOL_NAME" /etc/fstab; then
-    echo "localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0" >> /etc/fstab
+    #localhost:/$VOL_NAME /mnt/$VOL_NAME glusterfs _netdev,transport=socket 0 0
+    echo "localhost:/gv0 /mnt/gv0 glusterfs _netdev,x-systemd.requires=glusterd.service,transport=socket 0 0" >> /etc/fstab
 fi
 systemctl daemon-reload 2>/dev/null || true
 
