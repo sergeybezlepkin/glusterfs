@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # ==========================================================
-# Cron: */5 * * * * /path/to/gluster-healthcheck.sh
+# Cron: */5 * * * * /path/to/health_check.sh
 # ==========================================================
 
 if [ "$EUID" -ne 0 ]; then exec sudo "$0" "$@"; fi
@@ -32,6 +32,7 @@ log_issue() {
     ISSUES=$((ISSUES + 1))
 }
 
+
 safe_count() {
     local cmd="$1"
     local result
@@ -44,7 +45,7 @@ safe_count() {
 }
 
 # ==========================================================
-# CHECK 1: glusterd service
+# CHECK: glusterd service
 # ==========================================================
 if ! systemctl is-active --quiet glusterd; then
     log_issue "CRITICAL" "glusterd is NOT running on $HOSTNAME"
@@ -52,7 +53,7 @@ if ! systemctl is-active --quiet glusterd; then
 fi
 
 # ==========================================================
-# CHECK 2: Peer status
+# CHECK: Peer status
 # ==========================================================
 TOTAL_PEERS=$(safe_count "gluster peer status | grep -c 'Hostname:'")
 CONNECTED=$(safe_count "gluster peer status | grep -c 'State: Peer in Cluster (Connected)'")
@@ -63,7 +64,7 @@ if [[ "$DISCONNECTED" -gt 0 ]]; then
 fi
 
 # ==========================================================
-# CHECK 3: Volume status
+# CHECK: Volume status
 # ==========================================================
 VOL_STATUS=$(gluster volume info "$VOL_NAME" 2>/dev/null | awk '/^Status:/{print $2; exit}')
 if [[ -z "$VOL_STATUS" ]]; then
@@ -73,7 +74,7 @@ elif [[ "$VOL_STATUS" != "Started" ]]; then
 fi
 
 # ==========================================================
-# CHECK 4: Brick status
+# CHECK: Brick status
 # ==========================================================
 TOTAL_BRICKS=$(safe_count "gluster volume status $VOL_NAME | grep -c '^Brick'")
 OFFLINE=$(gluster volume status "$VOL_NAME" 2>/dev/null | awk '$NF=="N"{printf "%s ",$2}' | sed 's/ $//')
@@ -83,25 +84,24 @@ if [[ -n "$OFFLINE" ]]; then
 fi
 
 # ==========================================================
-# CHECK 5-7: Heal / Split-brain / Failed
+# CHECK: Heal / Failed (Split-Brain moved to CHECK 12)
 # ==========================================================
 HEAL_ENTRIES=$(safe_count "gluster volume heal $VOL_NAME info | awk '/Number of entries/{sum+=\$NF} END{print sum+0}'")
-SPLIT_BRAIN=$(safe_count "gluster volume heal $VOL_NAME info split-brain | awk '/Number of entries/{sum+=\$NF} END{print sum+0}'")
 HEAL_FAILED=$(safe_count "gluster volume heal $VOL_NAME info heal-failed | awk '/Number of entries/{sum+=\$NF} END{print sum+0}'")
 
 if [[ "$HEAL_ENTRIES" -gt 0 ]]; then
     log_issue "WARNING" "$HEAL_ENTRIES entries pending self-heal"
     gluster volume heal "$VOL_NAME" full >/dev/null 2>&1
 fi
-[[ "$SPLIT_BRAIN" -gt 0 ]] && log_issue "CRITICAL" "SPLIT-BRAIN: $SPLIT_BRAIN entries (manual fix required)"
 [[ "$HEAL_FAILED" -gt 0 ]] && log_issue "ERROR" "Heal failed: $HEAL_FAILED entries"
 
 # ==========================================================
-# CHECK 8: Mount & Disk usage (robust FUSE check + auto-recovery)
+# CHECK: Mount & Disk usage (Readiness Check + Exact Errors)
 # ==========================================================
 DISK_USAGE=""
 DISK_AVAIL="N/A"
 MOUNT_PATH="/mnt/$VOL_NAME"
+BRICK_PATH="/data/gluster/brick"
 
 is_mount_alive() {
     local path="$1"
@@ -121,30 +121,118 @@ if is_mount_alive "$MOUNT_PATH"; then
     fi
 else
     if [[ -d "$MOUNT_PATH" ]]; then
-        log_issue "CRITICAL" "Mount point $MOUNT_PATH exists but is NOT accessible (hung FUSE or stale mount)"
+        log_issue "CRITICAL" "Mount point $MOUNT_PATH is NOT accessible"
+        log_message "INFO" "Attempting recovery..."
 
-        log_message "INFO" "Attempting auto-recovery..."
+        if [[ -d "$BRICK_PATH" ]]; then
+            BRICK_OWNER=$(stat -c '%U:%G' "$BRICK_PATH" 2>/dev/null)
+            if [[ "$BRICK_OWNER" != "gluster:gluster" && "$BRICK_OWNER" != "glusterfs:glusterfs" ]]; then
+                log_message "INFO" "Fixing brick permissions: $BRICK_OWNER -> gluster:gluster"
+                chown -R gluster:gluster "$BRICK_PATH" 2>/dev/null || true
+                systemctl restart glusterfsd 2>/dev/null || true
+            fi
+        fi
 
-        umount -l "$MOUNT_PATH" 2>/dev/null || true
+        umount -l "$MOUNT_PATH" 2>/dev/null
+        sleep 2
 
-        fuser -km "$MOUNT_PATH" 2>/dev/null || true
+        VOL_STATE=$(gluster volume info "$VOL_NAME" 2>/dev/null | awk '/^Status:/{print $2}')
+        if [[ "$VOL_STATE" != "Started" ]]; then
+            log_message "INFO" "Volume $VOL_NAME is $VOL_STATE. Starting..."
+            gluster volume start "$VOL_NAME" 2>&1 | tee -a "$ALERT_LOG"
+        fi
+
+        log_message "INFO" "Waiting for glusterfsd to initialize..."
+        timeout 10 bash -c 'until pgrep -x glusterfsd >/dev/null || ss -tlnp | grep -q glusterfsd; do sleep 1; done' 2>/dev/null
         sleep 2
 
         if timeout 5 rm -rf "$MOUNT_PATH" 2>/dev/null; then
             mkdir -p "$MOUNT_PATH"
-            if mount -t glusterfs "localhost:/$VOL_NAME" "$MOUNT_PATH" 2>/dev/null; then
-                log_message "OK" "Auto-recovery successful: $MOUNT_PATH remounted"
+            
+            MOUNT_CMD="mount -t glusterfs localhost:/$VOL_NAME $MOUNT_PATH"
+            log_message "INFO" "Executing: $MOUNT_CMD"
+            
+            MOUNT_OUTPUT=$($MOUNT_CMD 2>&1)
+            MOUNT_RC=$?
+            
+            if [[ $MOUNT_RC -eq 0 ]]; then
+                log_message "OK" "Recovery successful: localhost:/$VOL_NAME remounted"
                 DISK_USAGE=$(df "$MOUNT_PATH" 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5}')
                 DISK_AVAIL=$(df -h "$MOUNT_PATH" 2>/dev/null | awk 'NR==2{print $4}')
             else
-                log_message "ERROR" "Auto-recovery failed: mount command failed for localhost:/$VOL_NAME"
+                log_message "ERROR" "Mount failed (RC=$MOUNT_RC): $MOUNT_OUTPUT"
             fi
         else
-            log_message "ERROR" "Auto-recovery failed: cannot remove hung directory (kernel-level hang). Manual reboot may be required."
+            log_message "CRITICAL" "Kernel VFS hang detected. Manual 'umount -f' or reboot required."
         fi
     else
-        log_issue "WARNING" "Volume not mounted at $MOUNT_PATH (directory does not exist)"
+        log_issue "WARNING" "Volume not mounted at $MOUNT_PATH (directory missing)"
     fi
+fi
+
+# ==========================================================
+# CHECK: TLS Certificate Expiry (15d WARNING, 5d CRITICAL)
+# ==========================================================
+CERT_FILE="/etc/ssl/glusterfs.pem"
+if [[ -f "$CERT_FILE" ]]; then
+    EXPIRY_DATE=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
+    if [[ -n "$EXPIRY_DATE" ]]; then
+        EXPIRY_EPOCH=$(date -d "$EXPIRY_DATE" +%s 2>/dev/null)
+        NOW_EPOCH=$(date +%s)
+        DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+
+        if [[ "$DAYS_LEFT" -le 0 ]]; then
+            log_issue "CRITICAL" "TLS certificate EXPIRED on $EXPIRY_DATE. Cluster traffic may be blocked."
+        elif [[ "$DAYS_LEFT" -le 5 ]]; then
+            log_issue "CRITICAL" "TLS certificate expires in $DAYS_LEFT days. IMMEDIATE renewal required!"
+        elif [[ "$DAYS_LEFT" -le 15 ]]; then
+            log_issue "WARNING" "TLS certificate expires in $DAYS_LEFT days. Schedule renewal."
+        else
+            log_message "INFO" "TLS certificate valid for $DAYS_LEFT days (expires: $EXPIRY_DATE)."
+        fi
+    else
+        log_message "WARNING" "Could not parse TLS certificate expiry date."
+    fi
+else
+    log_issue "CRITICAL" "TLS certificate missing at $CERT_FILE."
+fi
+
+# ==========================================================
+# CHECK: Time Synchronization (NTP/Chrony)
+# ==========================================================
+NTP_STATUS=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)
+if [[ "$NTP_STATUS" != "yes" ]]; then
+    log_issue "CRITICAL" "System time is NOT synchronized (NTP=off). High risk of split-brain & metadata corruption!"
+else
+    log_message "INFO" "System time synchronized via NTP."
+    if command -v chronyc &>/dev/null; then
+        OFFSET=$(chronyc tracking 2>/dev/null | awk '/^System time/{gsub(/s/,"",$4); print $4}')
+        if [[ -n "$OFFSET" ]]; then
+            IS_HIGH=$(awk -v off="$OFFSET" 'BEGIN{print (off>1 || off<-1) ? 1 : 0}')
+            if [[ "$IS_HIGH" == "1" ]]; then
+                log_issue "WARNING" "NTP offset is ${OFFSET}s. GlusterFS requires < 1s offset for consistency."
+            fi
+        fi
+    fi
+fi
+
+# ==========================================================
+# CHECK: Split-Brain Detection & Auto-Resolution
+# ==========================================================
+SPLIT_BRAIN=$(safe_count "gluster volume heal $VOL_NAME info split-brain | awk '/Number of entries/{sum+=\$NF} END{print sum+0}'")
+if [[ "$SPLIT_BRAIN" -gt 0 ]]; then
+    log_issue "CRITICAL" "SPLIT-BRAIN detected: $SPLIT_BRAIN file(s) in conflict"
+    log_message "INFO" "Attempting auto-resolution (policy: latest-mtime)..."
+    RESOLVE_OUTPUT=$(gluster volume heal "$VOL_NAME" split-brain latest-mtime 2>&1)
+    if [[ $? -eq 0 ]]; then
+        log_message "OK" "Split-brain resolved successfully using latest-mtime policy."
+    else
+        log_message "ERROR" "Auto-resolution failed. Manual intervention required."
+        log_message "INFO" "Debug: gluster volume heal $VOL_NAME info split-brain"
+        log_message "INFO" "Output: $RESOLVE_OUTPUT"
+    fi
+else
+    log_message "INFO" "No split-brain entries detected."
 fi
 
 # ==========================================================
