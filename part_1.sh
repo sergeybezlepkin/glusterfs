@@ -56,7 +56,7 @@ touch /var/lib/glusterd/secure-access
 
 if [[ ! -f /etc/ssl/glusterfs.key ]]; then
     openssl genrsa -out /etc/ssl/glusterfs.key 2048
-    openssl req -new -x509 -key /etc/ssl/glusterfs.key -subj "/CN=$LOCAL_HOST" -out /etc/ssl/glusterfs.pem
+    openssl req -new -x509 -key /etc/ssl/glusterfs.key -subj "/CN=$LOCAL_HOST" -days 3650 -out /etc/ssl/glusterfs.pem
     chmod 640 /etc/ssl/glusterfs.{key,pem}
     chown root:root /etc/ssl/glusterfs.{key,pem}
 fi
