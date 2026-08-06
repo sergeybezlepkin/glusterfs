@@ -84,7 +84,7 @@ if [[ -n "$OFFLINE" ]]; then
 fi
 
 # ==========================================================
-# CHECK: Heal / Failed (Split-Brain moved to CHECK 12)
+# CHECK: Heal / Failed (Split-Brain)
 # ==========================================================
 HEAL_ENTRIES=$(safe_count "gluster volume heal $VOL_NAME info | awk '/Number of entries/{sum+=\$NF} END{print sum+0}'")
 HEAL_FAILED=$(safe_count "gluster volume heal $VOL_NAME info heal-failed | awk '/Number of entries/{sum+=\$NF} END{print sum+0}'")
