@@ -52,7 +52,7 @@ This project automatically installs GlusterFS and configures a cluster with encr
 
 ```health_check.sh```
 
-- A file that checks the cluster status and writes a log with output to the terminal. It's best to add this file to the cron service.
+A file that checks the cluster status and writes a log with output to the terminal. It's best to add this file to the cron service.
 - Checking the glusterd service
 - Checking the status of nodes (peer)
 - Checking volume status
