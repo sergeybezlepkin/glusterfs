@@ -80,3 +80,4 @@ dnf install git -y && git clone https://github.com/sergeybezlepkin/glusterfs.git
 
 ## License
 
+This project uses the [MIT](https://github.com/sergeybezlepkin/glusterfs/blob/main/LICENSE)
